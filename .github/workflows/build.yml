@@ -23,46 +23,52 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android Build Tools & Platform 34
+      - name: Verify Pre-Installed Android SDK & Build Tools
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "platform-tools" "build-tools;34.0.0" "platforms;android-34" "cmdline-tools;latest"
+          export ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER=$(find "$ANDROID_SDK_ROOT/cmdline-tools" -name sdkmanager | head -n 1)
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --licenses || true
+          "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" "platform-tools" "build-tools;34.0.0" "platforms;android-34"
 
       - name: Download & Install Godot 4.2.2 + Export Templates
         run: |
           wget -q https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip
           wget -q https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz
           unzip -q Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip
-          mv Godot_v${GODOT_VERSION}-stable_linux.x86_64 /usr/local/bin/godot
-          chmod +x /usr/local/bin/godot
+          sudo mv Godot_v${GODOT_VERSION}-stable_linux.x86_64 /usr/local/bin/godot
+          sudo chmod +x /usr/local/bin/godot
           mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
           unzip -q Godot_v${GODOT_VERSION}-stable_export_templates.tpz
           mv templates/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
           rm -rf Godot_v${GODOT_VERSION}-stable* templates
 
-      - name: Generate Debug Keystore & Configure Godot Android Editor Settings
+      - name: Generate Debug Keystore & Configure Godot Android Settings
         run: |
-          mkdir -p ~/.config/godot
           keytool -keyalg RSA -genkeypair -alias androiddebugkey \
             -keypass android -keystore debug.keystore -storepass android \
             -dname "CN=Android Debug,O=Android,C=US" -validity 9999 -deststoretype pkcs12
-          KEYSTORE_PATH="$(pwd)/debug.keystore"
-          cat <<EOF > ~/.config/godot/editor_settings-4.tres
-          [gd_resource type="EditorSettings" format=3]
+          python3 - << 'PYEOF'
+          import os, pathlib
 
-          [resource]
-          export/android/android_sdk_path = "${ANDROID_HOME}"
-          export/android/debug_keystore = "${KEYSTORE_PATH}"
-          export/android/debug_keystore_user = "androiddebugkey"
-          export/android/debug_keystore_pass = "android"
-          EOF
+          sdk_path = os.environ.get("ANDROID_HOME", "/usr/local/lib/android/sdk")
+          keystore_path = str(pathlib.Path("debug.keystore").resolve())
+          cfg_dir = pathlib.Path.home() / ".config" / "godot"
+          cfg_dir.mkdir(parents=True, exist_ok=True)
+
+          content = (
+              '[gd_resource type="EditorSettings" format=3]\n\n'
+              '[resource]\n'
+              f'export/android/android_sdk_path = "{sdk_path}"\n'
+              f'export/android/debug_keystore = "{keystore_path}"\n'
+              'export/android/debug_keystore_user = "androiddebugkey"\n'
+              'export/android/debug_keystore_pass = "android"\n'
+          )
+          (cfg_dir / "editor_settings-4.tres").write_text(content)
+          (cfg_dir / "editor_settings-4.2.tres").write_text(content)
+          PYEOF
 
       - name: Generate Procedural Audio & Stadium Data Bank (>105 MB Uncompressed)
         run: |
-          mkdir -p generated_banks
           python3 - << 'PYEOF'
           import wave, struct, math, random, os
 
@@ -106,14 +112,10 @@ jobs:
                   if chunk:
                       w.writeframesraw(chunk)
 
-          print("Generating stadium audio files...")
           make_wav("generated_banks/crowd_ambience.wav", 6.0, 44100, "crowd")
           make_wav("generated_banks/whistle.wav", 0.6, 44100, "whistle")
           make_wav("generated_banks/ball_kick.wav", 0.35, 44100, "kick")
 
-          # Generate uncompressed stadium & telemetry bank so packaged APK exceeds 100 MB
-          # High-entropy procedural table so ZIP/APK packaging keeps >105 MB size
-          print("Generating 106 MB procedural stadium & telemetry pack...")
           target_bytes = 108 * 1024 * 1024
           with open("generated_banks/stadium_acoustic_bank.bin", "wb") as f:
               written = 0
@@ -121,13 +123,16 @@ jobs:
               while written < target_bytes:
                   f.write(os.urandom(block_size))
                   written += block_size
-          print("Done generating assets.")
           PYEOF
 
       - name: Import Project & Export Signed Android APK
+        env:
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ github.workspace }}/debug.keystore
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
+          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
         run: |
           mkdir -p build
-          godot --headless --import
+          godot --headless --import || true
           godot --headless --export-debug "Android" build/PenaltyChampions3D.apk
           ls -lh build/PenaltyChampions3D.apk
 
